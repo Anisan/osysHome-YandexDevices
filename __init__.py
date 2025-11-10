@@ -215,23 +215,24 @@ class YandexDevices(BasePlugin):
             items = data['items']
             with session_scope() as session:
                 for item in items:
-                    station_id = item['id']
-                    rec = session.query(YaStation).filter(YaStation.station_id == station_id).one_or_none()
+                    if item['platform'] not in ['iot_app_android','iot_app_ios','alice_app_ios']: #remove unused platforms
+                        station_id = item['id']
+                        rec = session.query(YaStation).filter(YaStation.station_id == station_id).one_or_none()
 
-                    if not rec:
-                        rec = YaStation()
-                        rec.station_id = item['id']
-                        session.add(rec)
+                        if not rec:
+                            rec = YaStation()
+                            rec.station_id = item['id']
+                            session.add(rec)
+                            session.commit()
+
+                        rec.title = item['name']
+                        rec.icon = item['icon']
+                        rec.platform = item['platform']
+                        rec.screen_capable = int(item['screen_capable'])
+                        rec.screen_present = int(item['screen_present'])
+                        rec.online = int(item['online'])
+
                         session.commit()
-
-                    rec.title = item['name']
-                    rec.icon = item['icon']
-                    rec.platform = item['platform']
-                    rec.screen_capable = int(item['screen_capable'])
-                    rec.screen_present = int(item['screen_present'])
-                    rec.online = int(item['online'])
-
-                    session.commit()
 
             self.add_scenarios()
 
