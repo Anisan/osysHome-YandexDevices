@@ -71,8 +71,12 @@ class YandexDevices(BasePlugin):
 
         if op == "generate_dev_token":
             id = request.args.get('id', None)
-            req = YaStation.get_by_id(id)
-            self.get_device_token(req.station_id, req.platform)
+            with session_scope() as session:
+                station = session.query(YaStation).where(YaStation.id == id).one_or_none()
+                token = self.quazar.get_device_token(station.iot_id, station.platform)
+                station.device_token = token
+                session.commit()
+
             return redirect("?station=" + id + "&op=edit")
 
         if op == 'edit':
@@ -309,204 +313,234 @@ class YandexDevices(BasePlugin):
         return in_str.translate(translation_table)
 
     def refresh_devices_data(self):
-        with session_scope() as session:
-            self.logger.debug("Begin get data devices")
+        try:
+            # Собираем список id устройств для опроса только внутри сессии, без удержания соединения во время I/O
+            device_ids_to_poll = []
+            default_period = self.config.get("update_period", 60)
+            now = get_now_to_utc()
 
-            # Получение списка устройств
-            update_linked = self.config.get('update_linked',True)
-            if update_linked:
-                # Подзапрос для выборки уникальных device_id из YaCapabilities
-                subquery = (
-                    select(distinct(YaCapabilities.device_id))
-                    .where(
-                        and_(
-                            YaCapabilities.linked_object is not None,
-                            YaCapabilities.linked_object != ""
+            with session_scope() as session:
+                self.logger.debug("Begin get data devices")
+                update_linked = self.config.get('update_linked', True)
+                if update_linked:
+                    subquery = (
+                        select(distinct(YaCapabilities.device_id))
+                        .where(
+                            and_(
+                                YaCapabilities.linked_object is not None,
+                                YaCapabilities.linked_object != ""
+                            )
                         )
                     )
-                )
-                # Основной запрос для выборки устройств из YaDevices
-                devices = (
-                    session.query(YaDevices)
-                    .filter(YaDevices.id.in_(subquery))  # Фильтруем по результатам подзапроса
-                    .all()
-                )
-            else:
-                devices = session.query(YaDevices).all()  # Все устройства
-            threads = []
-            for device in devices:
+                    devices = (
+                        session.query(YaDevices)
+                        .filter(YaDevices.id.in_(subquery))
+                        .all()
+                    )
+                else:
+                    devices = session.query(YaDevices).all()
 
-                period = device.update_period
-                if period is None:
-                    period = self.config.get("update_period", 60)  # get default period from settings
-                dt = device.updated + datetime.timedelta(seconds=period)
-                if get_now_to_utc() < dt:
-                    continue
-                t = threading.Thread(name="YandexDevice_" + device.title,target=self.refresh_device_data, args=(device.id,))
+                for device in devices:
+                    period = device.update_period if device.update_period is not None else default_period
+                    updated = device.updated
+                    if updated is None:
+                        # новое устройство — опрашиваем
+                        device_ids_to_poll.append((device.id, device.title or f"device_{device.id}"))
+                        continue
+                    dt = updated + datetime.timedelta(seconds=period)
+                    if now >= dt:
+                        device_ids_to_poll.append((device.id, device.title or f"device_{device.id}"))
+
+            # Запуск потоков и ожидание — без удержания сессии БД (избегаем блокировок/исчерпания пула)
+            threads = []
+            for device_id, device_title in device_ids_to_poll:
+                t = threading.Thread(
+                    name=f"YandexDevice_{device_title}",
+                    target=self.refresh_device_data,
+                    args=(device_id,),
+                )
                 threads.append(t)
                 t.start()
 
-            # Ожидание завершения всех потоков
-            for event in threads:
-                event.join()  # Ожидаем, пока каждый закончит работу
+            for t in threads:
+                t.join()
 
             self.logger.debug("End get data devices")
+        except Exception as ex:
+            self.logger.error(f"refresh_devices_data error: {ex}", exc_info=True)
 
     def refresh_device_data(self, id):
-        with session_scope() as session:
-            device = session.query(YaDevices).filter(YaDevices.id == id).one_or_none()
-            if not device:
-                return
-            self.logger.info(f"Begin get data device - {device.title}({device.room})")
-            # Узнаем IOT_ID
-            iot_id = device.iot_id
+        def _touch_device_updated(device_id):
+            """Обновить время опроса устройства при ошибке, чтобы не опрашивать каждую секунду."""
+            try:
+                with session_scope() as session:
+                    dev = session.query(YaDevices).filter(YaDevices.id == device_id).one_or_none()
+                    if dev:
+                        dev.updated = get_now_to_utc()
+                        session.commit()
+            except Exception as e:
+                self.logger.warning(f"Could not touch device {device_id} updated: {e}")
 
-            # Запрос информации об устройстве
-            data = self.quazar.api_request(
-                f"https://iot.quasar.yandex.ru/m/user/devices/{iot_id}"
-            )
-            self.logger.debug(data)
-            if not isinstance(data, dict):
+        try:
+            with session_scope() as session:
+                device = session.query(YaDevices).filter(YaDevices.id == id).one_or_none()
+                if not device:
+                    return
+                self.logger.info(f"Begin get data device - {device.title}({device.room})")
+                iot_id = device.iot_id
+
+                data = self.quazar.api_request(
+                    f"https://iot.quasar.yandex.ru/m/user/devices/{iot_id}"
+                )
+                self.logger.debug(data)
+                if not isinstance(data, dict):
+                    device.updated = get_now_to_utc()
+                    session.commit()
+                    self.sendDataToWebsocket("updateDevice", row2dict(device))
+                    self.logger.info(f"End get data device - {device.title}({device.room})")
+                    return
+
+                current_status = 0
+                if "state" in data:
+                    current_status = 1 if data["state"] == "online" else 0
+
+                online_array = {
+                    "type": "devices",
+                    "state": {"value": current_status},
+                    "parameters": {"instance": "online"},
+                }
+                if "properties" not in data:
+                    data["properties"] = []
+                data["properties"].append(online_array)
+
+                # Цикл по всем возможностям устройства
+                if isinstance(data.get("capabilities"), list):
+                    for capability in data["capabilities"]:
+                        if capability is None:
+                            continue
+                        c_type = capability.get("type") or "unknown"
+                        if c_type == "devices.capabilities.on_off":
+                            pass  # c_type уже задан
+                        elif capability.get("state", {}) and capability.get("state", {}).get("instance"):
+                            c_type += f'.{capability["state"]["instance"]}'
+                        elif capability.get("parameters", {}) and capability.get("parameters", {}).get("instance"):
+                            c_type += f'.{capability["parameters"]["instance"]}'
+                        else:
+                            c_type += ".unknown"
+
+                        req_skill = (
+                            session.query(YaCapabilities)
+                            .filter(
+                                YaCapabilities.title == c_type,
+                                YaCapabilities.device_id == device.id,
+                            )
+                            .one_or_none()
+                        )
+                        if not req_skill:
+                            req_skill = YaCapabilities(title=c_type, device_id=device.id)
+                            session.add(req_skill)
+                            session.commit()
+
+                        # Основные возможности, меняем значение
+                        value = None
+                        if capability.get("state", {}) and isinstance(capability.get("state", {}).get("value"), bool):
+                            value = int(capability["state"]["value"])
+                        elif capability.get("state", {}) and capability.get("state", {}).get("instance") == "color":
+                            value = capability["state"]["value"].get("id")
+                        elif capability.get("state", {}) and capability.get("state", {}).get("instance") == "scene":
+                            value = capability["state"]["value"].get("id") if isinstance(capability["state"]["value"], dict) else capability["state"]["value"]
+                        else:
+                            if capability.get("state", {}):
+                                value = capability.get("state", {}).get("value")
+                            else:
+                                value = "?"
+
+                        new_value = value
+                        old_value = req_skill.value
+
+                        if req_skill.linked_object and req_skill.linked_property:
+                            linked_object_property = (
+                                f"{req_skill.linked_object}.{req_skill.linked_property}"
+                            )
+                            updateProperty(linked_object_property, new_value, self.name)
+
+                        if new_value != old_value:
+                            req_skill.value = str(new_value)
+                            req_skill.updated = get_now_to_utc()
+                            session.commit()
+
+                        if new_value != old_value and req_skill.linked_object and req_skill.linked_method:
+                            method_params = {
+                                "NEW_VALUE": new_value,
+                                "OLD_VALUE": old_value,
+                                "DEVICE_STATE": current_status,
+                                "UPDATED": req_skill.updated,
+                                "MODULE": self.name,
+                            }
+                            callMethod(
+                                f"{req_skill.linked_object}.{req_skill.linked_method}",
+                                method_params,
+                                self.name,
+                            )
+
+                # Значения датчиков
+                if isinstance(data.get("properties"), list):
+                    for prop in data["properties"]:
+                        p_type_raw = prop.get("type")
+                        params = prop.get("parameters") or {}
+                        instance = params.get("instance")
+                        if not p_type_raw or instance is None:
+                            continue
+                        p_type = f"{p_type_raw}.{instance}"
+
+                        req_prop = (
+                            session.query(YaCapabilities).filter(YaCapabilities.title == p_type, YaCapabilities.device_id == device.id).one_or_none()
+                        )
+                        if not req_prop:
+                            req_prop = YaCapabilities(title=p_type, device_id=device.id)
+                            session.add(req_prop)
+                            session.commit()
+
+                        # Основные датчики
+                        value = None
+                        if prop.get("state"):
+                            value = prop["state"].get("value")
+
+                        new_value = value
+                        old_value = req_prop.value
+
+                        if req_prop.linked_object and req_prop.linked_property:
+                            linked_object_property = (
+                                f"{req_prop.linked_object}.{req_prop.linked_property}"
+                            )
+                            setProperty(linked_object_property, new_value, self.name)
+
+                        if new_value != old_value:
+                            req_prop.value = new_value
+                            req_prop.updated = get_now_to_utc()
+                            session.commit()
+
+                        if new_value != old_value and req_prop.linked_object and req_prop.linked_method:
+                            method_params = {
+                                "NEW_VALUE": new_value,
+                                "OLD_VALUE": old_value,
+                                "DEVICE_STATE": current_status,
+                                "UPDATED": req_prop.updated,
+                                "MODULE": self.name,
+                            }
+                            callMethod(
+                                f"{req_prop.linked_object}.{req_prop.linked_method}",
+                                method_params,
+                                self.name,
+                            )
+
                 device.updated = get_now_to_utc()
                 session.commit()
                 self.sendDataToWebsocket("updateDevice", row2dict(device))
                 self.logger.info(f"End get data device - {device.title}({device.room})")
-                return
-
-            current_status = 0
-            if "state" in data:
-                current_status = 1 if data["state"] == "online" else 0
-
-            online_array = {
-                "type": "devices",
-                "state": {"value": current_status},
-                "parameters": {"instance": "online"},
-            }
-            if "properties" not in data:
-                data["properties"] = []
-            data["properties"].append(online_array)
-
-            # Цикл по всем возможностям устройства
-            if isinstance(data.get("capabilities"), list):
-                for capability in data["capabilities"]:
-                    if capability is None:
-                        continue
-                    c_type = capability["type"]
-
-                    if capability["type"] == "devices.capabilities.on_off":
-                        c_type = capability["type"]
-                    elif capability.get("state", {}) is not None and capability.get("state", {}).get("instance"):
-                        c_type += f'.{capability["state"]["instance"]}'
-                    elif capability.get("parameters", {}) is not None and capability.get("parameters", {}).get("instance"):
-                        c_type += f'.{capability["parameters"]["instance"]}'
-                    else:
-                        c_type += ".unknown"
-
-                    req_skill = (
-                        session.query(YaCapabilities)
-                        .filter(
-                            YaCapabilities.title == c_type,
-                            YaCapabilities.device_id == device.id,
-                        )
-                        .one_or_none()
-                    )
-                    if not req_skill:
-                        req_skill = YaCapabilities(title=c_type, device_id=device.id)
-                        session.add(req_skill)
-                        session.commit()
-
-                    # Основные возможности, меняем значение
-                    value = None
-                    if capability.get("state", {}) is not None and isinstance(capability.get("state", {}).get("value"), bool):
-                        value = int(capability["state"]["value"])
-                    elif capability.get("state", {}) is not None and capability.get("state", {}).get("instance") == "color":
-                        value = capability["state"]["value"]["id"]
-                    elif capability.get("state", {}) is not None and capability.get("state", {}).get("instance") == "scene":  # xor2016: добавлена сцена для Я.лампочки
-                        value = capability["state"]["value"]["id"]
-                    else:
-                        if capability.get("state", {}) is not None:
-                            value = capability.get("state", {}).get("value")
-                        else:
-                            value = "?"
-
-                    new_value = value
-                    old_value = req_skill.value
-
-                    if req_skill.linked_object and req_skill.linked_property:
-                        linked_object_property = (
-                            f"{req_skill.linked_object}.{req_skill.linked_property}"
-                        )
-                        updateProperty(linked_object_property, new_value, self.name)
-
-                    if new_value != old_value:
-                        req_skill.value = str(new_value)
-                        req_skill.updated = get_now_to_utc()
-                        session.commit()
-
-                    if new_value != old_value and req_skill.linked_object and req_skill.linked_method:
-                        method_params = {
-                            "NEW_VALUE": new_value,
-                            "OLD_VALUE": old_value,
-                            "DEVICE_STATE": current_status,
-                            "UPDATED": req_skill.updated,
-                            "MODULE": self.name,
-                        }
-                        callMethod(
-                            f"{req_skill.linked_object}.{req_skill.linked_method}",
-                            method_params,
-                            self.name,
-                        )
-
-            # Значения датчиков
-            if isinstance(data.get("properties"), list):
-                for property in data["properties"]:
-                    p_type = f"{property['type']}.{property['parameters']['instance']}"
-
-                    req_prop = (
-                        session.query(YaCapabilities).filter(YaCapabilities.title == p_type,YaCapabilities.device_id == device.id).one_or_none()
-                    )
-                    if not req_prop:
-                        req_prop = YaCapabilities(title=p_type, device_id=device.id)
-                        session.add(req_prop)
-                        session.commit()
-
-                    # Основные датчики
-                    value = None
-                    if property["state"]:
-                        value = property["state"].get("value")
-
-                    new_value = value
-                    old_value = req_prop.value
-
-                    if req_prop.linked_object and req_prop.linked_property:
-                        linked_object_property = (
-                            f"{req_prop.linked_object}.{req_prop.linked_property}"
-                        )
-                        setProperty(linked_object_property, new_value, self.name)
-
-                    if new_value != old_value:
-                        req_prop.value = new_value
-                        req_prop.updated = get_now_to_utc()
-                        session.commit()
-
-                    if new_value != old_value and req_prop.linked_object and req_prop.linked_method:
-                        method_params = {
-                            "NEW_VALUE": new_value,
-                            "OLD_VALUE": old_value,
-                            "DEVICE_STATE": current_status,
-                            "UPDATED": req_prop.updated,
-                            "MODULE": self.name,
-                        }
-                        callMethod(
-                            f"{req_prop.linked_object}.{req_prop.linked_method}",
-                            method_params,
-                            self.name,
-                        )
-
-            device.updated = get_now_to_utc()
-            session.commit()
-            self.sendDataToWebsocket("updateDevice", row2dict(device))
-            self.logger.info(f"End get data device - {device.title}({device.room})")
+        except Exception as ex:
+            self.logger.error(f"refresh_device_data error (device id={id}): {ex}", exc_info=True)
+            _touch_device_updated(id)
 
     def changeLinkedProperty(self, obj, prop, val):
         with session_scope() as session:

@@ -5,11 +5,18 @@ import re
 import urllib.parse
 import certifi
 
+# Таймауты (connect, read) в секундах — без них запрос может висеть бесконечно при проблемах с сетью/сервером
+DEFAULT_CONNECT_TIMEOUT = 10
+DEFAULT_READ_TIMEOUT = 30
+DEFAULT_TIMEOUT = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT)
+
 class QuazarApi():
     def __init__(self, cache_dir, logger):
         self.logger = logger
         self.cache_dir = cache_dir
         self.cookie_path = os.path.join(self.cache_dir,'cookie')
+        self.csrf_token = self.get_token()
+        self.music_token = None
 
     def api_request(self, url, method='GET', params=None, repeating=0, csrf_token=None, debug=0):
         # Initialize session and headers
@@ -35,14 +42,14 @@ class QuazarApi():
         response = None
         try:
             if method == 'GET':
-                response = session.get(url, headers=headers, cookies=session.cookies)
+                response = session.get(url, headers=headers, cookies=session.cookies, timeout=DEFAULT_TIMEOUT, verify=certifi.where())
             else:
                 if isinstance(params, dict):
                     params = json.dumps(params)
                 if method == 'POST':
-                    response = session.post(url, data=params, headers=headers, cookies=session.cookies, verify=certifi.where())
+                    response = session.post(url, data=params, headers=headers, cookies=session.cookies, timeout=DEFAULT_TIMEOUT, verify=certifi.where())
                 else:
-                    response = session.request(method, url, data=params, headers=headers, cookies=session.cookies, verify=certifi.where())
+                    response = session.request(method, url, data=params, headers=headers, cookies=session.cookies, timeout=DEFAULT_TIMEOUT, verify=certifi.where())
         except requests.RequestException as e:
             self.logger.error(f"Request error: {e}")
             return None
@@ -65,6 +72,58 @@ class QuazarApi():
             return self.api_request(url, method, params, repeating=1, csrf_token=csrf_token, debug=debug)
 
         return data
+    
+    def _get_session(self):
+        # Initialize a session to handle cookies
+        session = requests.Session()
+
+        # Load cookies from the file using MozillaCookieJar
+        if self.cookie_path is not None and os.path.exists(self.cookie_path):
+            with open(self.cookie_path, 'r') as f:
+                cookies = requests.utils.cookiejar_from_dict(json.load(f))
+                session.cookies.update(cookies)
+
+        return session
+    
+    def get_device_token(self, device_id, platform):
+        self.logger.debug("Обновление токена устройства")
+
+        session = self._get_session()
+
+        if not self.music_token:
+            self.music_token = self.get_music_token(self.csrf_token)
+
+        # OAuth should be capitalize, or music will be 128 bitrate quality
+        headers = {}
+        headers["Authorization"] = f"OAuth {self.music_token}"
+
+        payload = {
+            "device_id": device_id,
+            "platform": platform,
+        }
+        r = session.get("https://quasar.yandex.net/glagol/token", headers=headers, params=payload, cookies=session.cookies, timeout=DEFAULT_TIMEOUT)
+        resp = json.loads(r.text)
+        if resp["status"] == "ok":
+            return resp["token"]
+        
+        return None
+    
+    def get_music_token(self, x_token: str):
+        """Get music token using x-token. Usual you should'n call this method."""
+        self.logger.debug("Get music token")
+
+        payload = {
+            # Thanks to https://github.com/MarshalX/yandex-music-api/
+            "client_secret": "53bc75238f0c4d08a118e51fe9203300",
+            "client_id": "23cabbbdc6cd418abb4b39c32c41195d",
+            "grant_type": "x-token",
+            "access_token": x_token,
+        }
+        session = self._get_session()
+        r = session.post("https://oauth.mobile.yandex.net/1/token", data=payload, timeout=DEFAULT_TIMEOUT)
+        resp = r.json()
+        assert "access_token" in resp, resp
+        return resp["access_token"]
 
     def get_token(self, url='https://yandex.ru/quasar/iot', error_monitor=False, error_monitor_type=1):
         # Create a session to maintain cookies
@@ -82,7 +141,7 @@ class QuazarApi():
 
         # Perform the GET request
         try:
-            response = session.get(url, headers=headers, cookies=session.cookies, verify=certifi.where())
+            response = session.get(url, headers=headers, cookies=session.cookies, timeout=DEFAULT_TIMEOUT, verify=certifi.where())
         except requests.RequestException as e:
             self.logger.error(f"Request error: {e}")
             return False
@@ -114,7 +173,7 @@ class QuazarApi():
                 session.cookies.update(cookies)
         
         # Perform a GET request
-        response = session.get(url, allow_redirects=True, verify=certifi.where())
+        response = session.get(url, allow_redirects=True, timeout=DEFAULT_TIMEOUT, verify=certifi.where())
 
         # Check if the CSRF token is in the response body
         match = re.search(r'"csrf_token" value="(.+?)"', response.text)
@@ -148,7 +207,7 @@ class QuazarApi():
                 cookies = requests.utils.cookiejar_from_dict(json.load(f))
                 session.cookies.update(cookies)
 
-            response = session.post('https://passport.yandex.ru/registration-validations/auth/password/submit', data=postvars, cookies=session.cookies, verify=certifi.where())
+            response = session.post('https://passport.yandex.ru/registration-validations/auth/password/submit', data=postvars, cookies=session.cookies, timeout=DEFAULT_TIMEOUT, verify=certifi.where())
 
             data = response.json()
 
@@ -183,7 +242,7 @@ class QuazarApi():
             session.cookies.update(cookies)
 
         # Perform POST request
-        response = session.post(url, data=postvars, cookies=session.cookies, verify=certifi.where())
+        response = session.post(url, data=postvars, cookies=session.cookies, timeout=DEFAULT_TIMEOUT, verify=certifi.where())
 
         # Assuming the response is JSON
         data = response.json()
