@@ -864,7 +864,10 @@ class YandexDevices(BasePlugin):
         return render_template("widget_yandexdevices.html",**content)
 
     def setDataDevice(self, device: YaDevices, property: YaCapabilities, value):
-        if property.title == "devices.capabilities.on_off":
+        p = property.title.split('.')
+        cap = p[0] + '.' + p[1] + '.' + p[2]  # уберем instance
+        inst = 'on' if p[2] == 'on_off' else p[3]
+        if p[2] in  ["on_off", "toggle"]:
             if value == 1:
                 value = True
             else:
@@ -872,9 +875,9 @@ class YandexDevices(BasePlugin):
         payload = {
             "actions": [
                 {
-                    "type": property.title,
+                    "type": cap,
                     "state": {
-                        "instance": "on",
+                        "instance": inst,
                         "value": value
                     }
                 }
