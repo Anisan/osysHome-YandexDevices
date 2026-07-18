@@ -7,6 +7,7 @@
 - [Руководство пользователя](USER_GUIDE.ru.md) — админка, авторизация, привязки, LAN
 - [Техническая документация](TECHNICAL_REFERENCE.ru.md) — модель данных, маршруты, опрос, Glagol
 - [Команды](Commands.md) — `glagol_command` из методов объектов через `callPluginFunction`
+- [MCP](mcp.ru.md) — коллекции, операции invoke, привязки для агентов
 
 ## Что открывать
 

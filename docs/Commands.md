@@ -49,7 +49,8 @@ callPluginFunction("YandexDevices", "glagol_command", {
 
 | Параметр | Назначение |
 |----------|------------|
-| `text` | Glagol `sendText` — TTS или команда Алисе. Если задан, `action` не нужен. |
+| `text` | Текст для отправки. Если `tts` не задан или `false` — голосовая команда Алисе (`sendText`). Если `tts=True` — произносится голосом (`repeat_phrase`). |
+| `tts` | `true` — использовать сценарий `repeat_phrase` (TTS с поддержкой SSML `<speaker voice="...">`). `false` / не указан — `sendText` (команда Алисе). |
 | `action` | Управление плеером (таблица ниже). |
 | `source` | Необязательно, для логов. |
 
@@ -57,7 +58,8 @@ callPluginFunction("YandexDevices", "glagol_command", {
 
 | Класс | Параметр | Glagol | Назначение |
 |-------|----------|--------|------------|
-| Голос / Алиса | `text` | `sendText` | Озвучить, команда Алисе, музыка/таймер **словами** |
+| TTS (озвучить) | `text` + `tts: true` | `serverAction` → `repeat_phrase` | Произнести текст вслух, поддержка SSML `<speaker voice="...">` |
+| Команда Алисе | `text` | `sendText` | Отправить фразу Алисе как голосовой запрос |
 | Плеер | `action` + поля | см. [Управление плеером](#управление-плеером) | Транспорт, громкость, repeat/shuffle, запуск по id |
 
 Админка станции (блок «Плеер») шлёт те же `action`, что и `glagol_command` — POST `/admin/.../station/<id>/glagol`. Разовый снимок плеера — GET на тот же URL.
@@ -66,17 +68,29 @@ callPluginFunction("YandexDevices", "glagol_command", {
 
 ---
 
-### `sendText` (`text`)
+### `text` — команда Алисе (`sendText`)
+
+Без `tts=true` текст отправляется как голосовая команда Алисе (через `sendText`).
 
 | Возможность | Поддержка |
 |-------------|-----------|
-| Дословное озвучивание | Да |
-| Умный дом / сценарии Алисы | Да, фраза как в голосе |
+| Команды умного дома / сценарии Алисы | Да, фраза как в голосе |
 | Музыка без id | Да: «включи джаз», «поставь мой плейлист «Дорога»» |
 | Таймер / будильник | Да фразой: «таймер на 5 минут», «будильник в 7:00» |
-| Разметка голоса | Подмножество SSML, напр. `<speaker effect="megaphone">…` |
-| Префикс «повтори за мной» | **Нет** (есть у action `say` в локальном TTS) |
-| Лимит | ~2000 символов после санитизации |
+| Разметка голоса SSML | **Нет** — для SSML используйте `tts: true` |
+| Лимит | ~2000 символов |
+
+### `text` + `tts: true` — TTS с SSML (`repeat_phrase`)
+
+С `tts: true` текст произносится голосом Алисы через сценарий `repeat_phrase` (аналог AlexxIT/YandexStation). Поддерживает SSML-разметку Яндекса.
+
+| Возможность | Поддержка |
+|-------------|-----------|
+| Дословное произнесение текста | Да |
+| Смена голоса | Да: `<speaker voice="zahar">…`, `<speaker voice="oksana">…` |
+| Эффекты | Да: `<speaker effect="megaphone">…` |
+| Команды Алисе | **Нет** — для команд используйте `text` без `tts` |
+| Лимит | ~2000 символов |
 
 ---
 
@@ -105,7 +119,8 @@ callPluginFunction("YandexDevices", "glagol_command", {
 |--------|-----------------|----------|
 | `play` | Продолжить после паузы / возобновить текущую очередь | Нет |
 | `play_music` | Конкретный **трек**, **альбом** или **плейлист** каталога | Да: `music_id` + `music_type` |
-| `text` | Поиск Алисой: исполнитель, жанр, «моя волна», радио, название | Нет |
+| `text` (без `tts`) | Поиск Алисой: исполнитель, жанр, «моя волна», радио, название | Нет |
+| `text` + `tts: true` | TTS с поддержкой SSML (смена голоса, эффекты) | Нет |
 | `next` / `prev` | Переключение в уже играющей очереди | Нет |
 
 `play` **сам по себе** новый альбом не откроет — только `play_music` или `text`.
@@ -250,7 +265,7 @@ def playFavoriteAlbum(self, params):
     "ok": True,
     "station_id": 8,
     "station_title": "ТВ Станция Бейсик",
-    "action": "sendText",   # или play, volume, …
+    "action": "sendText",   # или repeat_phrase, play, volume, …
     "host": "192.168.0.145",
     "port": 1961,
     "response": { ... },    # если колонка прислала JSON
@@ -297,15 +312,23 @@ return "ok"
 callPluginFunction("YandexDevices", "glagol_command", {
     "object": self.name,
     "text": "Температура в комнате двадцать три градуса",
+    "tts": True,
 })
 ```
 
-С эффектами (разметка `sendText`):
+С SSML-разметкой (смена голоса, эффекты):
 
 ```python
 callPluginFunction("YandexDevices", "glagol_command", {
     "object": self.name,
-    "text": '<speaker effect="megaphone">Внимание! Важное сообщение',
+    "text": '<speaker voice="zahar">Внимание! Важное сообщение',
+    "tts": True,
+})
+
+callPluginFunction("YandexDevices", "glagol_command", {
+    "object": self.name,
+    "text": '<speaker effect="megaphone">Пожарная тревога!',
+    "tts": True,
 })
 ```
 
@@ -357,8 +380,9 @@ def runAliceCommand(self, params):
 |--|------------------------|------------------|
 | Вызов | `say("текст", level, {"station": "…"})` | `callPluginFunction(...)` |
 | Режим | По `tts` станции: облако или LAN | Только LAN (Glagol) |
-| Префикс | Для локального TTS добавляет «повтори за мной» | Текст как есть |
-| Когда использовать | Озвучивание по level/min_level | Точные команды плеера и Алисе из методов объекта |
+| Префикс | Для локального TTS добавляет «повтори за мной» | Без `tts=true`: как есть. С `tts=true`: сценарий `repeat_phrase` |
+| SSML `<speaker>` | Нет (теги вырезаются) | Да, с `tts: true` |
+| Когда использовать | Озвучивание по level/min_level | Точные команды плеера, TTS с SSML, Алиса из методов объекта |
 
 ---
 
@@ -378,7 +402,8 @@ Id трека/альбома для `play_music` в объект **не** пиш
 
 | Задача | Вызов |
 |--------|--------|
-| Озвучить текст | `{"object": "…", "text": "…"}` |
+| Озвучить текст | `{"object": "…", "text": "…", "tts": true}` |
+| Озвучить с SSML / смена голоса | `{"object": "…", "text": '<speaker voice="zahar">…', "tts": true}` |
 | Команда Алисе / умный дом | `{"object": "…", "text": "включи свет"}` |
 | Музыка без id | `{"object": "…", "text": "включи джаз"}` |
 | Play / pause / next | `{"object": "…", "action": "play"}` … |
@@ -398,6 +423,7 @@ Id трека/альбома для `play_music` в объект **не** пиш
 | `no device token` | Нет токена — сформировать в админке |
 | `no response` | Колонка не ответила на `action` (сеть, порт 1961) |
 | `sendText not acknowledged` | Ответ пришёл, но не успех (редко для sendText) |
+| `repeat_phrase not acknowledged` | Ответ пришёл, но не успех (редко для repeat_phrase) |
 | `command not acknowledged` | Ответ плеера без успешного status |
 | `action or text required` | Не передан ни `text`, ни `action` |
 | `unknown action` (в `detail`) | `action` не из списка плеера (см. таблицу `action`) |

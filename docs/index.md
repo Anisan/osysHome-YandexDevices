@@ -7,6 +7,7 @@ The documentation is split into:
 - [User Guide](USER_GUIDE.md) — admin UI, authorization, links, LAN setup
 - [Technical Reference](TECHNICAL_REFERENCE.md) — data model, routes, polling, Glagol internals
 - [Commands](Commands.md) — `glagol_command` from object methods via `callPluginFunction`
+- [MCP (RU)](mcp.ru.md) — collections, invoke operations, bindings for agents
 
 ## What to open
 

@@ -347,7 +347,7 @@ class YandexDevices(BasePlugin):
             if text_raw is not None and str(text_raw).strip():
                 from plugins.YandexDevices.glagol_local import glagol_send_text
 
-                phrase = self._sanitize_tts_text(str(text_raw), 2000)
+                phrase = str(text_raw)
                 send_fn = self._glagol_lan_send_fn(station_db_id, host, port, token)
                 ok, resp, detail = glagol_send_text(
                     host, port, token, phrase, self.logger, send_fn=send_fn
@@ -864,10 +864,7 @@ class YandexDevices(BasePlugin):
         return render_template("widget_yandexdevices.html",**content)
 
     def setDataDevice(self, device: YaDevices, property: YaCapabilities, value):
-        p = property.title.split('.')
-        cap = p[0] + '.' + p[1] + '.' + p[2]  # уберем instance
-        inst = 'on' if p[2] == 'on_off' else p[3]
-        if p[2] in  ["on_off", "toggle"]:
+        if property.title == "devices.capabilities.on_off":
             if value == 1:
                 value = True
             else:
@@ -875,9 +872,9 @@ class YandexDevices(BasePlugin):
         payload = {
             "actions": [
                 {
-                    "type": cap,
+                    "type": property.title,
                     "state": {
-                        "instance": inst,
+                        "instance": "on",
                         "value": value
                     }
                 }
@@ -986,12 +983,20 @@ class YandexDevices(BasePlugin):
         """
         Универсальная отправка команды Glagol (LAN) в колонку.
 
+        Параметры:
+            station (str): название станции
+            text (str): текст для отправки (команда или TTS)
+            tts (bool): если True — текст произносится голосом (с поддержкой SSML ``<speaker voice="...">``),
+                        иначе отправляется как голосовая команда (sendText).
+            action (str): управление плеером (play, pause, stop, next, prev, volume, …)
+
         Предназначен для вызова из методов объектов osysHome через
         ``callPluginFunction("YandexDevices", "glagol_command", {...})``.
         См. ``plugins/YandexDevices/docs/Commands.md``.
         """
         from plugins.YandexDevices.glagol_local import (
             glagol_player_command,
+            glagol_repeat_phrase,
             glagol_send_text,
             parse_host_port,
         )
@@ -1030,15 +1035,23 @@ class YandexDevices(BasePlugin):
 
         text = kwargs.get("text")
         if text is not None and str(text).strip():
-            phrase = self._sanitize_tts_text(str(text), 2000)
+            phrase = str(text)
             send_fn = self._glagol_lan_send_fn(station_id, host, port, token)
-            ok, resp, detail = glagol_send_text(
-                host, port, token, phrase, self.logger, send_fn=send_fn
-            )
+            is_tts = kwargs.get("tts", False)
+            if is_tts:
+                ok, resp, detail = glagol_repeat_phrase(
+                    host, port, token, phrase, self.logger, send_fn=send_fn
+                )
+                action = "repeat_phrase"
+            else:
+                ok, resp, detail = glagol_send_text(
+                    host, port, token, phrase, self.logger, send_fn=send_fn
+                )
+                action = "sendText"
             out = {
                 **base,
                 "ok": bool(ok),
-                "action": "sendText",
+                "action": action,
                 "host": host,
                 "port": port,
             }
@@ -1047,7 +1060,7 @@ class YandexDevices(BasePlugin):
             if detail:
                 out["detail"] = detail
             if not ok and resp is not None:
-                out["error"] = "sendText not acknowledged"
+                out["error"] = f"{action} not acknowledged"
             return out
 
         action = (kwargs.get("action") or "").strip()
@@ -1105,7 +1118,7 @@ class YandexDevices(BasePlugin):
         """Локальный TTS/команда по WebSocket Glagol (нужны IP, platform, iot_id, device_token)."""
         from plugins.YandexDevices.glagol_local import glagol_send_text, parse_host_port
 
-        text = self._sanitize_tts_text(command or '', 2000)
+        text = command or ''
         if not text.strip():
             self.logger.warning("Local TTS: пустая фраза для станции %s", getattr(station, "title", "?"))
             return False
@@ -1154,8 +1167,6 @@ class YandexDevices(BasePlugin):
                 self.send_cloud_TTS(ystation,command,'text_action')
 
     def send_cloud_TTS(self, station: YaStation, message: str, action='phrase_action'):
-
-        message = self._sanitize_tts_text(message or '', 99)
 
         # Debug logging if error monitoring is enabled
         self.logger.info(f"Sending cloud '{action}: {message}' to {station.title}")
@@ -1211,3 +1222,97 @@ class YandexDevices(BasePlugin):
             self.logger.error(result, 'Failed to update TTS scenario')
 
         return False
+
+
+    # --- MCP integration ---
+
+    def mcp_capabilities(self):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_capabilities()
+
+    def mcp_config_schema(self):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_config_schema()
+
+    def mcp_entity_schema(self, collection: str):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_entity_schema(collection)
+
+    def mcp_list_entities(
+        self,
+        collection: str,
+        query: str = None,
+        limit: int = 100,
+        device_id=None,
+        online=None,
+        room=None,
+        device_type=None,
+        linked_object=None,
+        glagol_linked_object=None,
+        has_binding=None,
+        has_glagol_link=None,
+        read_only=None,
+    ):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_list_entities(
+            collection,
+            query=query,
+            limit=limit,
+            device_id=device_id,
+            online=online,
+            room=room,
+            device_type=device_type,
+            linked_object=linked_object,
+            glagol_linked_object=glagol_linked_object,
+            has_binding=has_binding,
+            has_glagol_link=has_glagol_link,
+            read_only=read_only,
+        )
+
+    def mcp_get_entity(self, collection: str, entity_id):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_get_entity(collection, entity_id)
+
+    def mcp_upsert_entity(self, collection: str, payload: dict, entity_id=None):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_upsert_entity(collection, payload, entity_id=entity_id)
+
+    def mcp_delete_entity(self, collection: str, entity_id):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_delete_entity(collection, entity_id)
+
+    def mcp_validate_entity_code(self, collection: str, code: str):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_validate_entity_code(collection, code)
+
+    def mcp_run_entity_dry(self, collection: str, code: str, context: dict = None):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_run_entity_dry(collection, code, context=context)
+
+    def mcp_invoke(self, operation: str, params: dict = None):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_invoke(operation, params or {})
+
+    def mcp_entity_revision(self, collection: str, entity_id):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_entity_revision(collection, entity_id)
+
+    def mcp_validate_entity(self, collection: str, payload: dict, entity_id=None):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_validate_entity(collection, payload, entity_id=entity_id)
+
+    def mcp_tools(self):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_descriptors()[0]
+
+    def mcp_resources(self):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_descriptors()[1]
+
+    def mcp_prompts(self):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_descriptors()[2]
+
+    def mcp_get_prompt(self, name: str, arguments: dict = None):
+        from plugins.YandexDevices import mcp_support
+        return mcp_support.mcp_get_prompt(name, arguments or {})

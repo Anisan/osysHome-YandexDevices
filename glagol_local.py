@@ -264,6 +264,61 @@ def glagol_send_text(
     return ok, data, None
 
 
+def glagol_repeat_phrase(
+    host: str,
+    port: int,
+    conversation_token: str,
+    text: str,
+    logger: logging.Logger,
+    *,
+    send_fn: Optional[Any] = None,
+) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+    """
+    TTS — произнести текст голосом Алисы (с поддержкой SSML-разметки).
+
+    Посылает ``serverAction`` со сценарием ``repeat_phrase``, что заставляет
+    колонку произнести переданный текст. Поддерживает ``<speaker voice="...">``
+    и другие SSML-теги Яндекса.
+
+    Returns:
+        ``(ok, response_json, detail)`` — см. ``glagol_send_text``.
+    """
+    payload = {
+        "command": "serverAction",
+        "serverActionEventPayload": {
+            "type": "server_action",
+            "name": "update_form",
+            "payload": {
+                "form_update": {
+                    "name": "personal_assistant.scenarios.quasar.iot.repeat_phrase",
+                    "slots": [
+                        {"type": "string", "name": "phrase_to_repeat", "value": text}
+                    ],
+                },
+                "resubmit": True,
+            },
+        },
+    }
+    if send_fn is not None:
+        data, err = send_fn(payload)
+    else:
+        data, err = glagol_request(host, port, conversation_token, payload, logger)
+    if not data:
+        if err == "timeout waiting for response":
+            logger.info(
+                "Glagol: repeat_phrase отправлен (%s), ответ не пришёл — считаем успехом",
+                host,
+            )
+            return True, None, err
+        return False, None, err
+    ok = _glagol_response_ok(data)
+    if ok:
+        logger.info("Glagol: repeat_phrase ok (%s)", host)
+    else:
+        logger.warning("Glagol: repeat_phrase status=%s payload=%s", data.get("status"), data)
+    return ok, data, None
+
+
 def cover_uri_to_url(cover_uri: str, size: str = "400x400") -> Optional[str]:
     """Превращает ``coverURI`` из ``playerState.extra`` в абсолютный URL обложки."""
     if not cover_uri or not isinstance(cover_uri, str):
