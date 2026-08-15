@@ -38,7 +38,7 @@ class YandexDevices(BasePlugin):
         )
         self.actions = ["cycle","say","widget"]
         self.category = "Devices"
-        self.version = 0.22
+        self.version = 0.23
         self.author = 'Eraser'
 
     def initialization(self):
@@ -822,6 +822,42 @@ class YandexDevices(BasePlugin):
                 device = session.query(YaDevices).filter(YaDevices.id == property.device_id).one_or_none()
                 if device:
                     self.setDataDevice(device, property, val)
+
+    def changeObject(self, event, object_name, property_name, method_name, new_value):
+        with session_scope() as session:
+            rows = session.query(YaCapabilities).filter(YaCapabilities.linked_object == object_name).all()
+            for row in rows:
+                if new_value is None and property_name is None and method_name is None:
+                    if row.linked_property:
+                        removeLinkFromObject(row.linked_object, row.linked_property, self.name)
+                    row.linked_object = None
+                    row.linked_property = None
+                    row.linked_method = None
+                elif property_name is None and method_name is None:
+                    old_prop = row.linked_property
+                    if old_prop:
+                        removeLinkFromObject(object_name, old_prop, self.name)
+                    row.linked_object = new_value
+                    if old_prop and new_value and row.read_only == 0:
+                        setLinkToObject(new_value, old_prop, self.name)
+                elif property_name:
+                    if (row.linked_property or '') == property_name:
+                        removeLinkFromObject(object_name, property_name, self.name)
+                        row.linked_property = new_value
+                        if new_value and row.read_only == 0:
+                            setLinkToObject(object_name, new_value, self.name)
+                elif method_name:
+                    if (row.linked_method or '') == method_name:
+                        row.linked_method = new_value
+
+            if property_name is None and method_name is None:
+                stations = session.query(YaStation).filter(
+                    YaStation.glagol_linked_object == object_name
+                ).all()
+                for station in stations:
+                    station.glagol_linked_object = new_value
+
+            session.commit()
 
     def say(self, message, level=0, args=None):
         with session_scope() as session:
