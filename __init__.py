@@ -665,7 +665,7 @@ class YandexDevices(BasePlugin):
                 if not isinstance(data, dict):
                     device.updated = get_now_to_utc()
                     session.commit()
-                    self.sendDataToWebsocket("updateDevice", row2dict(device))
+                    self.sendDataToWebsocket("updateDevice", row2dict(device, timezone="UTC"))
                     self.logger.info(f"End get data device - {device.title}({device.room})")
                     return
 
@@ -805,7 +805,7 @@ class YandexDevices(BasePlugin):
 
                 device.updated = get_now_to_utc()
                 session.commit()
-                self.sendDataToWebsocket("updateDevice", row2dict(device))
+                self.sendDataToWebsocket("updateDevice", row2dict(device, timezone="UTC"))
                 self.logger.info(f"End get data device - {device.title}({device.room})")
         except Exception as ex:
             self.logger.error(f"refresh_device_data error (device id={id}): {ex}", exc_info=True)
